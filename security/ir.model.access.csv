@@ -1,0 +1,7 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_hr_leave_tracker_user,hr.leave.tracker.user,model_hr_leave_tracker,hr_holidays.group_hr_holidays_user,1,1,1,0
+access_hr_leave_tracker_manager,hr.leave.tracker.manager,model_hr_leave_tracker,hr_holidays.group_hr_holidays_manager,1,1,1,1
+access_hr_employee_leave_overview_user,hr.employee.leave.overview.user,model_hr_employee_leave_overview,hr_holidays.group_hr_holidays_user,1,0,0,0
+access_hr_employee_leave_overview_manager,hr.employee.leave.overview.manager,model_hr_employee_leave_overview,hr_holidays.group_hr_holidays_manager,1,0,0,0
+access_hr_leave_import_user,hr.leave.import.user,model_hr_leave_import,hr_holidays.group_hr_holidays_user,1,1,1,1
+access_hr_leave_import_manager,hr.leave.import.manager,model_hr_leave_import,hr_holidays.group_hr_holidays_manager,1,1,1,1
