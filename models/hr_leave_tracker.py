@@ -17,7 +17,12 @@ class HrLeaveTracker(models.Model):
     total_allocation = fields.Float(string='Total Allocation', default=0.0)
     taken_leaves = fields.Float(string='Taken Leaves', default=0.0)
     pending_requests = fields.Float(string='Pending Requests', default=0.0)
-    current_balance = fields.Float(string='Current Balance', compute='_compute_current_balance', store=True)
+    current_balance = fields.Float(
+        string='Current Balance',
+        compute='_compute_current_balance',
+        store=True
+    )
+
     annual_carry = fields.Float(string="Carry Forward", default=0.0)
     expired_carry = fields.Float(string="Expired Carrry", default=0.0)
     
@@ -27,21 +32,66 @@ class HrLeaveTracker(models.Model):
     department_id = fields.Many2one('hr.department', string='Department', compute='_compute_display_fields', store=True)
     name = fields.Char(string='Name', compute='_compute_name', store=True)
 
+    total_dynamic = fields.Float(
+        string='Total Dynamic',
+        default=0.0,
+        store=True,
+        help='Dynamic total including accruals (total_allocation + accrued_new)'
+    )
+    display_total = fields.Float(
+        string='Total',
+        compute='_compute_display_total',
+        inverse='_inverse_display_total',  
+        store=True
+    )
+
+    # --- CREATE OVERRIDE to fix first-import negative balances ---
+    @api.model
+    def create(self, vals):
+        leave_type_id = vals.get("leave_type_id")
+        if leave_type_id:
+            leave_type = self.env["hr.leave.type"].browse(leave_type_id)
+            if leave_type and leave_type.name.lower() == "annual leave":
+                vals["display_total"] = vals.get("total_dynamic", vals.get("total_allocation", 0.0))
+            else:
+                vals["display_total"] = vals.get("total_allocation", 0.0)
+        return super(HrLeaveTracker, self).create(vals)
+
+    @api.depends('total_allocation', 'total_dynamic', 'leave_type_id')
+    def _compute_display_total(self):
+        for record in self:
+            if record.leave_type_id and record.leave_type_id.name.lower() == 'annual leave':
+                record.display_total = record.total_dynamic
+            else:
+                record.display_total = record.total_allocation
+
+    def _inverse_display_total(self):
+        for record in self:
+            if record.leave_type_id and record.leave_type_id.name.lower() == 'annual leave':
+                record.total_dynamic = record.display_total
+            else:
+                record.total_allocation = record.display_total
+
+    @api.depends('display_total', 'taken_leaves')
+    def _compute_current_balance(self):
+        for record in self:
+            record.current_balance = record.display_total - record.taken_leaves
+            _logger.info(
+                "HR Leave Tracker [%s] - Leave Type: %s, Display Total: %s, Taken Leaves: %s, Current Balance: %s",
+                record.id,
+                record.leave_type_name,
+                record.display_total,
+                record.taken_leaves,
+                record.current_balance
+            )
+
+    imported_taken = fields.Float(string='Imported Taken', default=0.0)
     carry_display = fields.Html(
         string="Carry / Expired",
         compute="_compute_carry_display",
-        sanitize=False,   # allow raw HTML
+        sanitize=False,
         store=False
     )
-
-    @api.depends('total_allocation', 'taken_leaves', 'annual_carry')
-    def _compute_current_balance(self):
-        for record in self:
-            if record.leave_type_name and 'annual' in record.leave_type_name.lower():
-                record.current_balance = record.total_allocation  - record.taken_leaves
-            else:
-                record.current_balance = record.total_allocation - record.taken_leaves
-
 
     @api.depends('employee_id', 'leave_type_id')
     def _compute_display_fields(self):
@@ -67,43 +117,51 @@ class HrLeaveTracker(models.Model):
                 record.name = record.employee_id.name
             else:
                 record.name = "New Tracker"
+    
+    import_applied = fields.Boolean(string="Import Applied", default=False)
 
     @api.onchange('employee_id', 'leave_type_id', 'year')
     def _onchange_employee_leave_type(self):
-        """Update leave counts when employee, leave type, or year changes."""
         for record in self:
             record.total_allocation = 0.0
+            record.total_dynamic = 0.0
             record.taken_leaves = 0.0
             record.pending_requests = 0.0
 
-            if record.employee_id and record.leave_type_id:
-                # Total allocation: sum allocations for this employee and leave type
-                allocations = self.env['hr.leave.allocation'].search([
-                    ('employee_id', '=', record.employee_id.id),
-                    ('holiday_status_id', '=', record.leave_type_id.id),
-                    ('state', '=', 'validate'),
-                ])
-                record.total_allocation = sum(allocations.mapped('number_of_days'))
+            if not record.employee_id or not record.leave_type_id:
+                continue
 
-                # Taken leaves (validated) in the selected year
-                leaves_taken = self.env['hr.leave'].search([
-                    ('employee_id', '=', record.employee_id.id),
-                    ('holiday_status_id', '=', record.leave_type_id.id),
-                    ('state', '=', 'validate'),
-                    ('request_date_from', '>=', f'{record.year}-01-01'),
-                    ('request_date_to', '<=', f'{record.year}-12-31'),
-                ])
-                record.taken_leaves = sum(leaves_taken.mapped('number_of_days'))
+            allocations = self.env['hr.leave.allocation'].search([
+                ('employee_id', '=', record.employee_id.id),
+                ('holiday_status_id', '=', record.leave_type_id.id),
+                ('state', '=', 'validate'),
+            ])
+            record.total_allocation = sum(allocations.mapped('number_of_days'))
 
-                # Pending leaves (confirmed) in the selected year
-                leaves_pending = self.env['hr.leave'].search([
-                    ('employee_id', '=', record.employee_id.id),
-                    ('holiday_status_id', '=', record.leave_type_id.id),
-                    ('state', '=', 'confirm'),
-                    ('request_date_from', '>=', f'{record.year}-01-01'),
-                    ('request_date_to', '<=', f'{record.year}-12-31'),
-                ])
-                record.pending_requests = sum(leaves_pending.mapped('number_of_days'))
+            if record.leave_type_id.name.lower() == 'annual leave':
+                record.total_dynamic = record.total_allocation + record.annual_carry
+            else:
+                record.total_dynamic = record.total_allocation
+
+            record.display_total = record.total_dynamic if record.leave_type_id.name.lower() == 'annual leave' else record.total_allocation
+
+            leaves_taken = self.env['hr.leave'].search([
+                ('employee_id', '=', record.employee_id.id),
+                ('holiday_status_id', '=', record.leave_type_id.id),
+                ('state', '=', 'validate'),
+                ('request_date_from', '>=', f'{record.year}-01-01'),
+                ('request_date_to', '<=', f'{record.year}-12-31'),
+            ])
+            record.taken_leaves = sum(leaves_taken.mapped('number_of_days'))
+
+            leaves_pending = self.env['hr.leave'].search([
+                ('employee_id', '=', record.employee_id.id),
+                ('holiday_status_id', '=', record.leave_type_id.id),
+                ('state', '=', 'confirm'),
+                ('request_date_from', '>=', f'{record.year}-01-01'),
+                ('request_date_to', '<=', f'{record.year}-12-31'),
+            ])
+            record.pending_requests = sum(leaves_pending.mapped('number_of_days'))
 
     def action_edit_details(self):
         return {
@@ -114,6 +172,7 @@ class HrLeaveTracker(models.Model):
             'view_mode': 'form',
             'target': 'new',
         }
+
 
 
 class HrEmployeeLeaveOverview(models.Model):
@@ -200,7 +259,7 @@ class HrEmployeeLeaveOverview(models.Model):
                     COALESCE(casual.current_balance,0) AS casual_balance,
 
                     -- Annual leave
-                    COALESCE(annual.total_allocation,0) AS annual_total,
+                    COALESCE(annual.total_dynamic,0) AS annual_total,
                     COALESCE(annual.taken_leaves,0) AS annual_taken,
                     COALESCE(annual.pending_requests,0) AS annual_pending,
                     COALESCE(annual.current_balance,0) AS annual_balance,

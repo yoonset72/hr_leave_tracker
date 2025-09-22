@@ -147,21 +147,36 @@
         <field name="arch" type="xml">
             <form string="Leave Tracker">
                 <sheet>
+                    <!-- Employee Selection -->
                     <group string="Employee Selection">
                         <field name="employee_id" options="{'no_create': False, 'no_open': False}"/>
                         <field name="leave_type_id" options="{'no_create': False, 'no_open': False}"/>
                         <field name="year"/>
                     </group>
 
+                    <!-- Leave Data -->
                     <group string="Leave Data">
-                        <field name="total_allocation"/>
+                        <!-- Show total_dynamic only for Annual Leave -->
+                        <field name="total_dynamic"
+                            attrs="{'invisible': [('leave_type_name', '!=', 'Annual Leave')]}"/>
+                        
+                        <!-- Show total_allocation for all other leave types -->
+                        <field name="total_allocation"
+                            attrs="{'invisible': [('leave_type_name', '=', 'Annual Leave')]}"/>
+                        
                         <field name="taken_leaves"/>
                         <field name="pending_requests"/>
-                        <field name="current_balance" readonly="1" help="Automatically calculated as Total Allocation - Taken Leaves"/>
+                        
+                        <!-- Current balance dynamically computed -->
+                        <field name="current_balance" readonly="1"
+                            help="Automatically calculated as Total Allocation or Dynamic Total minus Taken Leaves"/>
+                        
+                        <!-- Annual leave carry info -->
                         <field name="annual_carry"/>
                         <field name="expired_carry"/>
                     </group>
 
+                    <!-- Computed Info -->
                     <group string="Computed Information" states="readonly">
                         <field name="name" readonly="1"/>
                         <field name="employee_name" readonly="1"/>
@@ -173,33 +188,41 @@
         </field>
     </record>
 
+
     <!-- Leave Tracker Tree View - FULLY EDITABLE -->
-<record id="view_hr_leave_tracker_tree" model="ir.ui.view">
+    <record id="view_hr_leave_tracker_tree" model="ir.ui.view">
     <field name="name">hr.leave.tracker.tree</field>
     <field name="model">hr.leave.tracker</field>
     <field name="arch" type="xml">
         <tree string="Leave Trackers" create="true" edit="true" delete="true" editable="bottom">
-            <header>
-                <button name="%(action_hr_leave_import)d" type="action" string="Import Historical Data" class="btn-primary"/>
-            </header>
+            <!-- Header button removed to prevent ParseError -->
+            
             <field name="employee_id" required="1"/>
             <field name="employee_number" string="Employee ID" readonly="1"/>
             <field name="department_id" string="Department" readonly="1"/>
             <field name="leave_type_id" required="1"/>
             <field name="year"/>
-            <field name="total_allocation"/>
+            
+            <!-- Total column -->
+            <field name="display_total" string="Total"/>
+            
             <field name="taken_leaves"/>
             <field name="pending_requests"/>
-            <field name="current_balance" readonly="1" decoration-danger="current_balance &lt;= 0"
-                   decoration-warning="current_balance &gt; 0 and current_balance &lt; 3"/>
+            <field name="current_balance" readonly="1"
+                decoration-danger="current_balance &lt;= 0"
+                decoration-warning="current_balance &gt; 0 and current_balance &lt; 3"/>
             <field name="annual_carry" readonly="1"/>
             <field name="expired_carry" readonly="1"/>
-            <!-- Display fields for reference -->
+            
+            <!-- Reference fields (hidden) -->
             <field name="employee_name" invisible="1"/>
             <field name="leave_type_name" invisible="1"/>
         </tree>
     </field>
 </record>
+
+
+
 
 
     <!-- Search Views -->

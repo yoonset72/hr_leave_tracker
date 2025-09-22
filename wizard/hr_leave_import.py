@@ -106,9 +106,9 @@ class HrLeaveImport(models.TransientModel):
                         continue
 
                     # Map columns to expected order
-                    if isinstance(row, dict):
-                        employee_id = str(row.get('Employee ID', '')).strip()
+                    if isinstance(row, dict):        
                         employee_name = str(row.get('Name', '')).strip()
+                        employee_id = str(row.get('Employee ID', '')).strip()
                         department_name = str(row.get('Department', '')).strip()
                         leave_type_name = str(row.get('Leave Type', '')).strip()
                         year_val = int(row.get('Year', self.year))
@@ -118,13 +118,14 @@ class HrLeaveImport(models.TransientModel):
                         current_balance = self.safe_float(row.get('Current Balance', 0))
                         carry_forwarded = self.safe_float(row.get('Carry Forwarded', 0))
                         expired_carry = self.safe_float(row.get('Expired Carry', 0))
+                        imported_taken = self.safe_float(row.get('Imported Taken', days_taken))
                     else:
-                        if len(row) < 11:
-                            errors.append(f"Row {row_num}: Insufficient columns (expected 11, got {len(row)})")
+                        if len(row) < 12:  # <--- change from 11 to 12
+                            errors.append(f"Row {row_num}: Insufficient columns (expected 12, got {len(row)})")
                             continue
 
-                        employee_id = str(row[0] or '').strip()
-                        employee_name = str(row[1] or '').strip()
+                        employee_name = str(row[0] or '').strip()
+                        employee_id = str(row[1] or '').strip()
                         department_name = str(row[2] or '').strip()
                         leave_type_name = str(row[3] or '').strip()
                         year_val = int(row[4] or self.year)
@@ -132,22 +133,21 @@ class HrLeaveImport(models.TransientModel):
                         days_taken = self.safe_float(row[6])
                         pending_requests = self.safe_float(row[7])
                         current_balance = self.safe_float(row[8])
-                        carry_forwarded = self.safe_float(row[9])
+                        carry_forwarded = self.safe_float(row[9])  
                         expired_carry = self.safe_float(row[10])
+                        imported_taken = self.safe_float(row[11])  # <--- add this line instead of imported_taken = days_taken
 
-                    
                     _logger.info("Processing Row %d: Employee ID='%s', Employee Name='%s'", row_num, employee_id, employee_name)
-
-
 
                     if not employee_id or not leave_type_name:
                         errors.append(f"Row {row_num}: Missing Employee ID or Leave Type")
                         continue
 
-                    employee = self.env['hr.employee'].search([('employee_number', '=', employee_id)], limit=1)
-                    if not employee and employee_name:
-                        employee = self.env['hr.employee'].search([('name', '=', employee_name)], limit=1)
-
+                    employee = self.env['hr.employee'].search([
+                        '|',
+                        ('employee_number', '=', employee_id),
+                        ('name', 'ilike', employee_name)
+                    ], limit=1)
                     if not employee:
                         errors.append(f"Row {row_num}: Could not find employee {employee_id} ({employee_name})")
                         continue
@@ -167,6 +167,7 @@ class HrLeaveImport(models.TransientModel):
                         'year': year_val,
                         'total_allocation': total_allocated,
                         'taken_leaves': days_taken,
+                        'imported_taken': imported_taken, 
                         'pending_requests': pending_requests,
                         'current_balance': current_balance,
                         'annual_carry': carry_forwarded,
@@ -175,7 +176,6 @@ class HrLeaveImport(models.TransientModel):
                         'employee_number': employee.employee_number or '',
                         'department_id': department_id,
                         'name': f"{leave_type_name} {year_val}",
-                        # 'is_historical': True,
                     }
 
                     existing_tracker = self.env['hr.leave.tracker'].search([
@@ -271,10 +271,10 @@ class HrLeaveImport(models.TransientModel):
     def action_download_template(self):
         headers = [
             'Employee ID', 'Name', 'Department', 'Leave Type', 'Year',
-            'Total Allocation', 'Taken Leaves', 'Pending Requests',
+            'Total Allocation', 'Taken Leaves', 'Imported Taken', 'Pending Requests',
             'Current Balance', 'Carry Forwarded', 'Expired Carry'
         ]
-        sample_data = ['EMP001','John Doe','HR','Annual Leave','2025','20','5','2','15','3','0']
+        sample_data = ['EMP001','John Doe','HR','Annual Leave','2025','20','5','5','2','15','3','0']
         csv_content = ','.join(headers) + '\n' + ','.join(sample_data)
         attachment = self.env['ir.attachment'].create({
             'name': 'hr_leave_template.csv',
