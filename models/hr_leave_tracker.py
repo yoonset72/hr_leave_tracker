@@ -1,8 +1,9 @@
 from odoo import models, fields, api
-from datetime import date
+from datetime import date, timedelta
 import logging
 
 _logger = logging.getLogger(__name__)
+
 
 class HrLeaveTracker(models.Model):
     _name = 'hr.leave.tracker'
@@ -10,6 +11,7 @@ class HrLeaveTracker(models.Model):
     _rec_name = 'name'
     _order = 'employee_id, year, leave_type_id'
 
+    # --- BASIC FIELDS ---
     employee_id = fields.Many2one('hr.employee', string='Employee', required=True, ondelete='cascade')
     leave_type_id = fields.Many2one('hr.leave.type', string='Leave Type', required=True, ondelete='cascade')
     year = fields.Char(string='Year', required=True, default=lambda self: str(date.today().year))
@@ -17,20 +19,15 @@ class HrLeaveTracker(models.Model):
     total_allocation = fields.Float(string='Total Allocation', default=0.0)
     taken_leaves = fields.Float(string='Taken Leaves', default=0.0)
     pending_requests = fields.Float(string='Pending Requests', default=0.0)
-    current_balance = fields.Float(
-        string='Current Balance',
-        compute='_compute_current_balance',
-        store=True
+
+    system_taken = fields.Float(
+        string='System Taken (After Cutoff)',
+        default=0.0,
+        help='System-calculated leave days after June 30 cutoff.'
     )
 
     annual_carry = fields.Float(string="Carry Forward", default=0.0)
-    expired_carry = fields.Float(string="Expired Carrry", default=0.0)
-    
-    employee_name = fields.Char(string='Employee Name', compute='_compute_display_fields', store=True)
-    employee_number = fields.Char(string='Employee Number', compute='_compute_display_fields', store=True)
-    leave_type_name = fields.Char(string='Leave Type Name', compute='_compute_display_fields', store=True)
-    department_id = fields.Many2one('hr.department', string='Department', compute='_compute_display_fields', store=True)
-    name = fields.Char(string='Name', compute='_compute_name', store=True)
+    expired_carry = fields.Float(string="Expired Carry", default=0.0)
 
     total_dynamic = fields.Float(
         string='Total Dynamic',
@@ -38,6 +35,7 @@ class HrLeaveTracker(models.Model):
         store=True,
         help='Dynamic total including accruals (total_allocation + accrued_new)'
     )
+
     display_total = fields.Float(
         string='Total',
         compute='_compute_display_total',
@@ -45,7 +43,36 @@ class HrLeaveTracker(models.Model):
         store=True
     )
 
-    # --- CREATE OVERRIDE to fix first-import negative balances ---
+    imported_taken = fields.Float(string='Imported Taken', default=0.0)
+    import_applied = fields.Boolean(string="Import Applied", default=False)
+
+    # --- DISPLAY / COMPUTE FIELDS ---
+    employee_name = fields.Char(string='Employee Name', compute='_compute_display_fields', store=True)
+    employee_number = fields.Char(string='Employee Number', compute='_compute_display_fields', store=True)
+    leave_type_name = fields.Char(string='Leave Type Name', compute='_compute_display_fields', store=True)
+    department_id = fields.Many2one('hr.department', string='Department', compute='_compute_display_fields', store=True)
+    name = fields.Char(string='Name', compute='_compute_name', store=True)
+
+    carry_display = fields.Html(
+        string="Carry / Expired",
+        compute="_compute_carry_display",
+        sanitize=False,
+        store=False
+    )
+
+    taken_display = fields.Float(
+        string='Taken',
+        compute='_compute_taken_display',
+        store=False
+    )
+
+    current_balance = fields.Float(
+        string='Current Balance',
+        compute='_compute_current_balance',
+        store=True
+    )
+
+    # --- CREATE OVERRIDE ---
     @api.model
     def create(self, vals):
         leave_type_id = vals.get("leave_type_id")
@@ -57,6 +84,7 @@ class HrLeaveTracker(models.Model):
                 vals["display_total"] = vals.get("total_allocation", 0.0)
         return super(HrLeaveTracker, self).create(vals)
 
+    # --- DISPLAY TOTAL (ANNUAL LEAVE vs OTHERS) ---
     @api.depends('total_allocation', 'total_dynamic', 'leave_type_id')
     def _compute_display_total(self):
         for record in self:
@@ -72,40 +100,45 @@ class HrLeaveTracker(models.Model):
             else:
                 record.total_allocation = record.display_total
 
-    @api.depends('display_total', 'taken_leaves')
-    def _compute_current_balance(self):
+    # --- TAKEN DISPLAY (CUT-OFF LOGIC) ---
+    @api.depends('taken_leaves', 'system_taken', 'leave_type_name')
+    def _compute_taken_display(self):
+        """Shows taken leave depending on cutoff: before or after June 30."""
+        today = date.today()
+        cutoff_date = date(today.year, 6, 30)
         for record in self:
-            record.current_balance = record.display_total - record.taken_leaves
+            if record.leave_type_name and record.leave_type_name.lower() == 'annual leave':
+                record.taken_display = record.system_taken if today > cutoff_date else record.taken_leaves
+            else:
+                record.taken_display = record.taken_leaves
+
+    # --- CURRENT BALANCE ---
+    @api.depends('display_total', 'taken_leaves', 'system_taken', 'leave_type_name')
+    def _compute_current_balance(self):
+        today = date.today()
+        cutoff_date = date(today.year, 6, 30)
+        for record in self:
+            if record.leave_type_name and record.leave_type_name.lower() == 'annual leave' and today > cutoff_date:
+                record.current_balance = record.display_total - record.system_taken
+            else:
+                record.current_balance = record.display_total - record.taken_leaves
+
             _logger.info(
-                "HR Leave Tracker [%s] - Leave Type: %s, Display Total: %s, Taken Leaves: %s, Current Balance: %s",
-                record.id,
-                record.leave_type_name,
-                record.display_total,
-                record.taken_leaves,
-                record.current_balance
+                "Leave Tracker [%s] - %s | Total: %.2f | Taken: %.2f | System: %.2f | Balance: %.2f",
+                record.id, record.leave_type_name, record.display_total,
+                record.taken_leaves, record.system_taken, record.current_balance
             )
 
-    imported_taken = fields.Float(string='Imported Taken', default=0.0)
-    carry_display = fields.Html(
-        string="Carry / Expired",
-        compute="_compute_carry_display",
-        sanitize=False,
-        store=False
-    )
-
+    # --- COMPUTE DISPLAY FIELDS ---
     @api.depends('employee_id', 'leave_type_id')
     def _compute_display_fields(self):
         for record in self:
-            if record.employee_id:
-                record.employee_name = record.employee_id.name or ''
-                record.employee_number = getattr(record.employee_id, 'employee_number', str(record.employee_id.id))
-                record.department_id = record.employee_id.department_id.id if record.employee_id.department_id else False
-            else:
-                record.employee_name = ''
-                record.employee_number = ''
-                record.department_id = False
+            record.employee_name = record.employee_id.name or ''
+            record.employee_number = getattr(record.employee_id, 'employee_number', str(record.employee_id.id)) if record.employee_id else ''
+            record.department_id = record.employee_id.department_id.id if record.employee_id and record.employee_id.department_id else False
             record.leave_type_name = record.leave_type_id.name if record.leave_type_id else ''
 
+    # --- COMPUTE NAME ---
     @api.depends('employee_id', 'leave_type_id', 'year')
     def _compute_name(self):
         for record in self:
@@ -117,16 +150,18 @@ class HrLeaveTracker(models.Model):
                 record.name = record.employee_id.name
             else:
                 record.name = "New Tracker"
-    
-    import_applied = fields.Boolean(string="Import Applied", default=False)
 
+    # --- ONCHANGE POPULATION ---
     @api.onchange('employee_id', 'leave_type_id', 'year')
     def _onchange_employee_leave_type(self):
+        today = date.today()
+        cutoff_date = date(today.year, 6, 30)
         for record in self:
             record.total_allocation = 0.0
             record.total_dynamic = 0.0
             record.taken_leaves = 0.0
             record.pending_requests = 0.0
+            record.system_taken = 0.0
 
             if not record.employee_id or not record.leave_type_id:
                 continue
@@ -140,20 +175,34 @@ class HrLeaveTracker(models.Model):
 
             if record.leave_type_id.name.lower() == 'annual leave':
                 record.total_dynamic = record.total_allocation + record.annual_carry
+
+                # --- Taken leave before/after cutoff ---
+                leaves_taken = self.env['hr.leave'].search([
+                    ('employee_id', '=', record.employee_id.id),
+                    ('holiday_status_id', '=', record.leave_type_id.id),
+                    ('state', '=', 'validate'),
+                    ('request_date_from', '>=', f'{record.year}-01-01'),
+                    ('request_date_to', '<=', f'{record.year}-12-31'),
+                ])
+                total_taken = sum(leaves_taken.mapped('number_of_days'))
+                record.taken_leaves = total_taken  # full-year total
+
+                # After cutoff, system_taken = post-cutoff leaves only
+                if today > cutoff_date:
+                    record.system_taken = sum(
+                        leave.number_of_days for leave in leaves_taken
+                        if leave.request_date_from > cutoff_date
+                    )
+                else:
+                    record.system_taken = 0.0
+
             else:
                 record.total_dynamic = record.total_allocation
+                record.system_taken = 0.0
 
             record.display_total = record.total_dynamic if record.leave_type_id.name.lower() == 'annual leave' else record.total_allocation
 
-            leaves_taken = self.env['hr.leave'].search([
-                ('employee_id', '=', record.employee_id.id),
-                ('holiday_status_id', '=', record.leave_type_id.id),
-                ('state', '=', 'validate'),
-                ('request_date_from', '>=', f'{record.year}-01-01'),
-                ('request_date_to', '<=', f'{record.year}-12-31'),
-            ])
-            record.taken_leaves = sum(leaves_taken.mapped('number_of_days'))
-
+            # Pending leaves
             leaves_pending = self.env['hr.leave'].search([
                 ('employee_id', '=', record.employee_id.id),
                 ('holiday_status_id', '=', record.leave_type_id.id),
@@ -163,6 +212,7 @@ class HrLeaveTracker(models.Model):
             ])
             record.pending_requests = sum(leaves_pending.mapped('number_of_days'))
 
+    # --- ACTION TO OPEN FORM ---
     def action_edit_details(self):
         return {
             'type': 'ir.actions.act_window',
@@ -172,7 +222,6 @@ class HrLeaveTracker(models.Model):
             'view_mode': 'form',
             'target': 'new',
         }
-
 
 
 class HrEmployeeLeaveOverview(models.Model):
@@ -239,7 +288,10 @@ class HrEmployeeLeaveOverview(models.Model):
 
     def init(self):
         """Create SQL view including total, taken, pending, balance, carry"""
-        current_year = str(date.today().year)
+        today = date.today()
+        cutoff_date = date(today.year, 6, 30)
+        current_year = str(today.year)
+        
         self.env.cr.execute("DROP VIEW IF EXISTS hr_employee_leave_overview CASCADE")
         
         self.env.cr.execute(f"""
@@ -260,9 +312,15 @@ class HrEmployeeLeaveOverview(models.Model):
 
                     -- Annual leave
                     COALESCE(annual.total_dynamic,0) AS annual_total,
-                    COALESCE(annual.taken_leaves,0) AS annual_taken,
+                    CASE
+                        WHEN CURRENT_DATE > DATE '{today.year}-06-30' THEN COALESCE(annual.system_taken,0)
+                        ELSE COALESCE(annual.taken_leaves,0)
+                    END AS annual_taken,
                     COALESCE(annual.pending_requests,0) AS annual_pending,
-                    COALESCE(annual.current_balance,0) AS annual_balance,
+                    CASE
+                        WHEN CURRENT_DATE > DATE '{today.year}-06-30' THEN COALESCE(annual.total_dynamic,0) - COALESCE(annual.system_taken,0)
+                        ELSE COALESCE(annual.current_balance,0)
+                    END AS annual_balance,
                     COALESCE(annual.annual_carry,0) AS annual_carry,
                     COALESCE(annual.expired_carry,0) AS expired_carry,
 
@@ -333,8 +391,6 @@ class HrEmployeeLeaveOverview(models.Model):
             )
         """)
 
-
-
     def action_view_casual_details(self):
         return self._open_leave_details('casual')
     
@@ -352,10 +408,6 @@ class HrEmployeeLeaveOverview(models.Model):
     
     def action_view_marriage_details(self):
         return self._open_leave_details('marriage')
-
-
-
-
 
     def write(self, vals):
         """Redirect writes from the SQL view to hr.leave.tracker records"""
